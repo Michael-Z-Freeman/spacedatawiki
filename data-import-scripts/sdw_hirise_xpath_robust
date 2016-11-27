@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Script to import HiRISE features from a KML feed into PostGreSQL database. The feed is published by HiRISE Co-Investigator Ross Beyer: http://rossbeyer.net/science/
+# This feed is updated regularly, at least for the moment.
+# This script is intended to regularly update features as part of CRON job for use in Space Data Wiki web maps.
+# Currently there seems to be no way, that I know of, of programatically importing features from the Planetary Data System.
+
+temp=/tmp
+kmldoclink=
+# Each region file has a different layer name which we need to tell ogr3ogr about.
+layer_name=
+
+# Remove possibly previously created "link" directory that stores the KML region file.
+
+rm -rf $temp/links
+
+# Get master KML file that contains link to main document.
+
+# Please note. Was using "-P" to make wget save to defined directory using "$temp" variable. However this seems to be bugged in wget v1.18 and was working in v1.17.
+cd /tmp
+wget -O HiRISE_PDS.kml http://pirlwww.lpl.arizona.edu/~rbeyer/kml/HiRISE_PDS.kml
+
+# Extract link the xpath way.
+
+kmldoclink=`xml_grep 'href' $temp/HiRISE_PDS.kml --text_only`
+
+# Get the main document.
+
+wget -O doc.kml $kmldoclink
+
+# Get all links the xpath way. We only need the links starting with "MC-" as these are the regions with the features. Could use xpath conditions to extract from only the relevant KML folders, but following is easier at the moment.  
+
+xml_grep 'href' $temp/doc.kml --text_only | awk '/^MC-/' > $temp/hirise_region_links
+
+# Retrieve all region KML files.
+
+wget --base=http://pirlwww.lpl.arizona.edu/~rbeyer/kml/HiRISE_PDS/ -i $temp/hirise_region_links -P $temp/links
+
+# Feed each region file to GDAL ogr2ogr which will append all features in each region file to the database.
+
+for i in $temp/links/*;
+do
+ # Note, some KML regions have no HiRISE features in them and do not have a layer name set so "layer_name" will be empty. Ogr2ogr will report "no such table".
+ layer_name=`xml_grep '//Document/name' $i --text_only`
+ ogr2ogr -f PostgreSQL PG:"dbname=original_hirise" $i -nln gdal_hirise_from_kml -a_srs "EPSG:4326" -dialect SQLite -sql "SELECT ST_CollectionExtract(geometry, 1) AS postgis_point, ST_CollectionExtract(geometry, 3) AS postgis_polygon, * FROM '$layer_name'"
+done
+
+# Drop unnecessary columns.
+
+echo 'ALTER TABLE gdal_hirise_from_kml DROP COLUMN "timestamp"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "begin"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "end"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "altitudemode"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "tessellate"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "extrude"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "visibility"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "draworder"; ALTER TABLE gdal_hirise_from_kml DROP COLUMN "icon";' | psql -d original_hirise
